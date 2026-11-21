@@ -13,9 +13,9 @@ constexpr int Height = 240;
 constexpr float BobHeight = 1.5f;
 constexpr float WaveSpeed = 2.3f;       // Radians per second
 constexpr float LetterPhase = 0.42f;   // Phase difference between neighbors
-constexpr float PauseSeconds = 0.28f;
-constexpr float JawOpenSpeed = 1.18f;   // Fraction of a full opening per second
-constexpr float SwallowSeconds = 0.44f;
+constexpr float PauseSeconds = 0.10f;
+constexpr float MouthBurstSeconds = 0.32f;
+constexpr float TongueSweepSeconds = 0.68f;
 
 // Each framebuffer word represents two horizontal pixels of the same color.
 constexpr u32 rgb(int r, int g, int b)
@@ -88,16 +88,6 @@ int textWidth(const char* text, int scale)
 }
 
 // Offsetting each column gives the jaws a pixel-stepped tilt.
-float distanceFromHinge(int x)
-{
-    return std::clamp((214 - x) / 196.0f, 0.0f, 1.0f);
-}
-
-int jawOffset(int x, float amount)
-{
-    return std::lround(distanceFromHinge(x) * amount);
-}
-
 void drawLetter(char letter, int x, int y, int scale, u32 color)
 {
     const u8* glyph = Glyphs[letter == '!' ? 26 : letter - 'A'];
@@ -198,7 +188,7 @@ void drawSeaside()
     std::memcpy(seaside, pixels, sizeof seaside);
 }
 
-enum class Screen { Title, Pause, Opening, Swallow, Dark };
+enum class Screen { Title, Pause, Burst, Sweep, Dark };
 struct TitleState {
     Screen screen = Screen::Title;
     int selected = 0;
@@ -264,12 +254,12 @@ bool updateTitle(TitleState& title, u32 buttons, float dt)
     } else {
         title.sceneTime += dt;
         if (title.screen == Screen::Pause && title.sceneTime >= PauseSeconds) {
-            title.screen = Screen::Opening;
+            title.screen = Screen::Burst;
             title.sceneTime = 0.0f;
-        } else if (title.screen == Screen::Opening && title.sceneTime * JawOpenSpeed >= 1.0f) {
-            title.screen = Screen::Swallow;
+        } else if (title.screen == Screen::Burst && title.sceneTime >= MouthBurstSeconds) {
+            title.screen = Screen::Sweep;
             title.sceneTime = 0.0f;
-        } else if (title.screen == Screen::Swallow && title.sceneTime >= SwallowSeconds) {
+        } else if (title.screen == Screen::Sweep && title.sceneTime >= TongueSweepSeconds) {
             title.screen = Screen::Dark;
         }
     }
@@ -361,20 +351,16 @@ void prepareLogo()
     }
 }
 
-void drawLogo(float waveTime, float opening, float upperTilt, float lowerTilt)
+void drawLogo(float waveTime)
 {
     for (int i = 0; i < LogoLetterCount; ++i) {
         const LogoLetter& letter = logo[i];
-        const bool upper = i < 4;
-        const int jawTop = upper ? UpperJawTop : LowerJawTop;
-        const float lift = (upper ? -10.0f : 12.0f) * opening;
-        const float tilt = upper ? upperTilt : lowerTilt;
-        // Keep the frozen bob initially, then settle into the shape of each jaw.
-        const int top = jawTop + std::lround(letterBob(waveTime, i) * (1.0f - opening) + lift);
+        const int jawTop = i < 4 ? UpperJawTop : LowerJawTop;
+        const int top = jawTop + letterBob(waveTime, i);
 
         for (int column = 0; column < letter.width; ++column) {
             const int x = letter.x + column;
-            const int y = top + jawOffset(x, tilt);
+            const int y = top;
             for (int row = 0; row < letter.height; ++row) {
                 if (letter.mask[column][row]) {
                     rectangle(x + 2, y + row + 4, 1, 1, TitleShadow);
@@ -383,7 +369,7 @@ void drawLogo(float waveTime, float opening, float upperTilt, float lowerTilt)
         }
         for (int column = 0; column < letter.width; ++column) {
             const int x = letter.x + column;
-            const int y = top + jawOffset(x, tilt);
+            const int y = top;
             for (int row = 0; row < letter.height; ++row) {
                 if (letter.mask[column][row]) {
                     const bool upperEdge = row < 2 || !letter.mask[column][row - 2];
@@ -417,26 +403,116 @@ void drawMenu(int selected)
     }
 }
 
-void drawMouth(float opening, float upperTilt, float lowerTilt)
-{
-    const int left = 22 - std::lround(5 * opening);
-    for (int x = left; x < 214; ++x) {
-        const float hinge = distanceFromHinge(x);
-        const int upper = UpperJawTop + LogoMaxHeight - std::lround(10 * opening) + jawOffset(x, upperTilt);
-        const int lower = LowerJawTop + std::lround(12 * opening) + jawOffset(x, lowerTilt);
-        const int taper = x < left + 12 ? (left + 12 - x) / 2 : 0;
-        rectangle(x, upper + taper, 1, lower - upper - 2 * taper, Black);
+constexpr int MonsterLetter = 5; // O in FOR
+constexpr u32 LipShadow = rgb(56, 9, 31);
+constexpr u32 LipRed = rgb(149, 25, 50);
+constexpr u32 LipLight = rgb(226, 57, 70);
+constexpr u32 TongueDark = rgb(95, 20, 54);
+constexpr u32 TonguePink = rgb(217, 56, 98);
+constexpr u32 TongueLight = rgb(255, 119, 137);
 
-        // One little triangle per tooth, using columns inside the mouth.
-        const int toothColumn = (x - left) % 15;
-        if (toothColumn < 9) {
-            const int depth = std::lround((5 - std::abs(4 - toothColumn)) * 2 * opening * hinge);
-            rectangle(x, upper + taper, 1, depth, Cream);
-        }
-        const int bottomColumn = (x - left + 7) % 15;
-        if (bottomColumn < 9) {
-            const int depth = std::lround((5 - std::abs(4 - bottomColumn)) * opening * hinge);
-            rectangle(x, lower - taper - depth, 1, depth, rgb(209, 192, 161));
+int roundedHalfSpan(int offset, int halfWidth, int halfHeight, int radius)
+{
+    // The sides stay flat until the scan line reaches a rounded corner.
+    const int corner = std::clamp(std::abs(offset) - (halfHeight - radius), 0, radius);
+    return halfWidth - radius + std::lround(std::sqrt(radius * radius - corner * corner));
+}
+
+void roundedMouthLayer(int x, int y, int rx, int ry, int radius, u32 color)
+{
+    radius = std::min({radius, rx, ry});
+    for (int dy = -ry; dy <= ry; ++dy) {
+        const int half = roundedHalfSpan(dy, rx, ry, radius);
+        rectangle(x - half, y + dy, half * 2 + 1, 1, color);
+    }
+}
+
+void drawFang(int x, int root, int width, int length, int direction, int lean)
+{
+    for (int row = 0; row < length; ++row) {
+        const int half = std::max(1, width * (length - row) / length / 2);
+        const int center = x + lean * row / length;
+        const int y = root + row * direction;
+        rectangle(center - half, y, half * 2, 1, rgb(173, 135, 132));
+        rectangle(center - half + 1, y, half, 1, Cream);
+    }
+}
+
+struct Mouth {
+    int x;
+    int y;
+    int width;
+    int height;
+};
+
+Mouth monsterMouth(float waveTime, float burst)
+{
+    const LogoLetter& letter = logo[MonsterLetter];
+    const int x = letter.x + letter.width / 2;
+    const int y = LowerJawTop + letter.height / 2 + letterBob(waveTime, MonsterLetter);
+    // Start in the counter of the O, then fast-out toward the player.
+    const float growth = 1.0f - (1.0f - burst) * (1.0f - burst) * (1.0f - burst);
+    return {x + std::lround(43 * growth), y - std::lround(33 * growth),
+            5 + std::lround(92 * growth), 8 + std::lround(60 * growth)};
+}
+
+void drawMonster(const Mouth& mouth)
+{
+    const int x = mouth.x;
+    const int y = mouth.y;
+    const int rx = mouth.width;
+    const int ry = mouth.height;
+    roundedMouthLayer(x + 3, y + 5, rx + 3, ry + 2, 30, LipShadow);
+    roundedMouthLayer(x, y, rx, ry, 28, LipRed);
+    roundedMouthLayer(x - 2, y - ry / 8, rx * 9 / 10, ry * 5 / 6, 24, LipLight);
+    const int cavityWidth = std::max(2, rx * 8 / 9);
+    const int cavityHeight = std::max(2, ry * 3 / 4);
+    const int cavityCorner = std::min({19, cavityWidth, cavityHeight});
+    roundedMouthLayer(x, y + 2, cavityWidth, cavityHeight, cavityCorner, LipShadow);
+    roundedMouthLayer(x + 2, y + 1, cavityWidth * 9 / 10, cavityHeight * 7 / 8, 16, Black);
+
+    if (rx < 20) {
+        return;
+    }
+    constexpr int Lengths[] = {14, 31, 17, 12, 15, 27, 17};
+    for (int i = 0; i < 7; ++i) {
+        const int offset = std::lround(cavityWidth * (i - 3) * 0.27f);
+        const int toothX = x + offset;
+        const int upperEdge = roundedHalfSpan(offset, cavityHeight, cavityWidth, cavityCorner);
+        const int lowerEdge = roundedHalfSpan(offset + 4, cavityHeight, cavityWidth, cavityCorner);
+        const int width = std::max(3, rx / (i % 2 == 0 ? 7 : 6));
+        const int length = Lengths[i] * ry / 68;
+        drawFang(toothX, y + 3 - upperEdge, width, length, 1, (3 - i) * 2);
+        drawFang(toothX + 4, y + lowerEdge, width - 2, length * 3 / 4, -1, (3 - i) * 2);
+    }
+}
+
+void drawTongue(const Mouth& mouth, float sweep)
+{
+    // A long, tapered tongue uncoils first, then rolls toward the screen.
+    const float reach = std::clamp(sweep / 0.60f, 0.0f, 1.0f);
+    const int tip = mouth.x + std::lround((Width + 52 - mouth.x) * reach);
+    for (int x = mouth.x; x < std::min(tip, Width); ++x) {
+        const float along = (x - mouth.x) / static_cast<float>(tip - mouth.x);
+        const int y = mouth.y + 27 + std::lround(
+            std::sin(along * 4.5f - sweep * 7.0f) * 44.0f * along) -
+            std::lround(along * 50 * reach);
+        const int half = std::max(1, static_cast<int>(std::lround((1.0f - along) * (13 + reach * 19))));
+        rectangle(x, y - half, 1, half * 2, TongueDark);
+        rectangle(x, y - half + 3, 1, std::max(1, half * 2 - 9), TonguePink);
+        rectangle(x, y - half / 2, 1, std::max(1, half / 5), TongueLight);
+    }
+
+    // Its curved edge crosses every row, leaving black behind it.
+    const float wipe = std::clamp((sweep - 0.35f) / 0.65f, 0.0f, 1.0f);
+    if (wipe > 0.0f) {
+        for (int y = 0; y < Height; ++y) {
+            const float bend = std::sin(y * 0.013f + sweep * 3.0f) * 42.0f;
+            const int edge = std::lround(-132 + (Width + 220) * wipe + bend);
+            rectangle(0, y, edge - 60, 1, Black);
+            rectangle(edge - 60, y, 60, 1, TongueDark);
+            rectangle(edge - 48, y, 45, 1, TonguePink);
+            rectangle(edge - 20, y, 8, 1, TongueLight);
         }
     }
 }
@@ -451,35 +527,16 @@ void drawTitle(const TitleState& title)
     }
 
     std::memcpy(pixels, seaside, sizeof pixels);
-    if (title.screen == Screen::Title || title.screen == Screen::Pause) {
-        drawMenu(title.selected);
-    }
-
-    float opening = 0.0f;
-    if (title.screen == Screen::Opening) {
-        const float t = std::clamp(title.sceneTime * JawOpenSpeed, 0.0f, 1.0f);
-        opening = t * t * (3.0f - 2.0f * t);
-    } else if (title.screen == Screen::Swallow) {
-        opening = 1.0f;
-    }
-
-    const float upperTilt = -31.0f * opening;
-    const float lowerTilt = 29.0f * opening;
-    if (opening > 0.0f) {
-        drawMouth(opening, upperTilt, lowerTilt);
-    }
-    drawLogo(title.waveTime, opening, upperTilt, lowerTilt);
-
-    if (title.screen == Screen::Swallow) {
-        // Expand the darkness from inside the mouth until it covers the display.
-        const float t = std::clamp(title.sceneTime / SwallowSeconds, 0.0f, 1.0f);
-        constexpr int MouthX = 104;
-        constexpr int MouthY = 118;
-        const int left = MouthX - std::lround(MouthX * t);
-        const int right = MouthX + std::lround((Width - MouthX) * t);
-        const int top = MouthY - std::lround(MouthY * t);
-        const int bottom = MouthY + std::lround((Height - MouthY) * t);
-        rectangle(left, top, right - left, bottom - top, Black);
+    drawMenu(title.selected);
+    drawLogo(title.waveTime);
+    if (title.screen == Screen::Burst || title.screen == Screen::Sweep) {
+        const bool sweeping = title.screen == Screen::Sweep;
+        const float burst = sweeping ? 1.0f : title.sceneTime / MouthBurstSeconds;
+        const Mouth mouth = monsterMouth(title.waveTime, burst);
+        drawMonster(mouth);
+        if (sweeping) {
+            drawTongue(mouth, title.sceneTime / TongueSweepSeconds);
+        }
     }
 }
 
