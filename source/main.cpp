@@ -13,7 +13,9 @@ constexpr int Height = 240;
 constexpr float BobHeight = 1.5f;
 constexpr float WaveSpeed = 2.3f;       // Radians per second
 constexpr float LetterPhase = 0.42f;   // Phase difference between neighbors
-constexpr float PauseSeconds = 0.10f;
+constexpr float FirstGrabSeconds = 0.12f;
+constexpr float SecondGrabSeconds = 0.60f;
+constexpr float StruggleSeconds = 1.23f;
 constexpr float MouthBurstSeconds = 0.32f;
 constexpr float TongueSweepSeconds = 0.68f;
 
@@ -87,7 +89,6 @@ int textWidth(const char* text, int scale)
     return width - scale;
 }
 
-// Offsetting each column gives the jaws a pixel-stepped tilt.
 void drawLetter(char letter, int x, int y, int scale, u32 color)
 {
     const u8* glyph = Glyphs[letter == '!' ? 26 : letter - 'A'];
@@ -188,7 +189,7 @@ void drawSeaside()
     std::memcpy(seaside, pixels, sizeof seaside);
 }
 
-enum class Screen { Title, Pause, Burst, Sweep, Dark };
+enum class Screen { Title, Struggle, Burst, Sweep, Dark };
 struct TitleState {
     Screen screen = Screen::Title;
     int selected = 0;
@@ -244,7 +245,7 @@ bool updateTitle(TitleState& title, u32 buttons, float dt)
             if (title.selected == MenuCount - 1) {
                 return false;
             }
-            title.screen = Screen::Pause;
+            title.screen = Screen::Struggle;
             title.sceneTime = 0.0f;
         }
     } else if (title.screen == Screen::Dark) {
@@ -253,7 +254,7 @@ bool updateTitle(TitleState& title, u32 buttons, float dt)
         }
     } else {
         title.sceneTime += dt;
-        if (title.screen == Screen::Pause && title.sceneTime >= PauseSeconds) {
+        if (title.screen == Screen::Struggle && title.sceneTime >= StruggleSeconds) {
             title.screen = Screen::Burst;
             title.sceneTime = 0.0f;
         } else if (title.screen == Screen::Burst && title.sceneTime >= MouthBurstSeconds) {
@@ -314,6 +315,7 @@ bool logoShape(char letter, float x, float y)
 }
 
 constexpr int LogoLetterCount = 12;
+constexpr int MonsterLetter = 5; // O in FOR
 constexpr int LogoMaxWidth = 49;
 constexpr int LogoMaxHeight = 74;
 constexpr int UpperJawTop = 46;
@@ -351,29 +353,59 @@ void prepareLogo()
     }
 }
 
-void drawLogo(float waveTime)
+struct StrugglePose {
+    float leftGrip;
+    float rightGrip;
+    int stretch;
+    int shake;
+};
+
+float easeBetween(float time, float start, float finish)
+{
+    const float t = std::clamp((time - start) / (finish - start), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+StrugglePose strugglePose(float time, float release)
+{
+    // One hand hooks the rim, slips, and leaves a gap before the second grab.
+    const float firstGrab = easeBetween(time, FirstGrabSeconds, FirstGrabSeconds + 0.10f) *
+                            (1.0f - easeBetween(time, 0.35f, 0.49f));
+    const float pull = easeBetween(time, SecondGrabSeconds + 0.16f, StruggleSeconds - 0.10f);
+    const float reach = 0.72f + pull * 0.28f;
+    const float left = (firstGrab + reach * easeBetween(time, SecondGrabSeconds, SecondGrabSeconds + 0.12f)) * release;
+    const float right = reach * easeBetween(time, SecondGrabSeconds + 0.07f, SecondGrabSeconds + 0.19f) * release;
+    return {left, right, static_cast<int>(std::lround(2 * left + 2 * right + 6 * pull * release)),
+            static_cast<int>(std::lround(std::sin(time * 65.0f) * 2 * pull * release))};
+}
+
+void drawLogo(float waveTime, const StrugglePose& pose)
 {
     for (int i = 0; i < LogoLetterCount; ++i) {
         const LogoLetter& letter = logo[i];
         const int jawTop = i < 4 ? UpperJawTop : LowerJawTop;
-        const int top = jawTop + letterBob(waveTime, i);
+        const int stretch = i == MonsterLetter ? pose.stretch : 0;
+        const int top = jawTop + letterBob(waveTime, i) +
+                        (i == MonsterLetter ? pose.shake : 0);
+        int left = letter.x - stretch / 2;
+        if (i == MonsterLetter - 1) left -= pose.stretch / 2;
+        if (i == MonsterLetter + 1) left += pose.stretch / 2;
+        const int width = letter.width + stretch;
 
-        for (int column = 0; column < letter.width; ++column) {
-            const int x = letter.x + column;
-            const int y = top;
+        for (int column = 0; column < width; ++column) {
+            const int source = stretch == 0 ? column : column * letter.width / width;
             for (int row = 0; row < letter.height; ++row) {
-                if (letter.mask[column][row]) {
-                    rectangle(x + 2, y + row + 4, 1, 1, TitleShadow);
+                if (letter.mask[source][row]) {
+                    rectangle(left + column + 2, top + row + 4, 1, 1, TitleShadow);
                 }
             }
         }
-        for (int column = 0; column < letter.width; ++column) {
-            const int x = letter.x + column;
-            const int y = top;
+        for (int column = 0; column < width; ++column) {
+            const int source = stretch == 0 ? column : column * letter.width / width;
             for (int row = 0; row < letter.height; ++row) {
-                if (letter.mask[column][row]) {
-                    const bool upperEdge = row < 2 || !letter.mask[column][row - 2];
-                    rectangle(x, y + row, 1, 1, upperEdge ? TitleHighlight : TitleRed);
+                if (letter.mask[source][row]) {
+                    const bool upperEdge = row < 2 || !letter.mask[source][row - 2];
+                    rectangle(left + column, top + row, 1, 1, upperEdge ? TitleHighlight : TitleRed);
                 }
             }
         }
@@ -403,7 +435,6 @@ void drawMenu(int selected)
     }
 }
 
-constexpr int MonsterLetter = 5; // O in FOR
 constexpr u32 LipShadow = rgb(56, 9, 31);
 constexpr u32 LipRed = rgb(149, 25, 50);
 constexpr u32 LipLight = rgb(226, 57, 70);
@@ -418,13 +449,61 @@ int roundedHalfSpan(int offset, int halfWidth, int halfHeight, int radius)
     return halfWidth - radius + std::lround(std::sqrt(radius * radius - corner * corner));
 }
 
-void roundedMouthLayer(int x, int y, int rx, int ry, int radius, u32 color)
+void roundedShape(int x, int y, int rx, int ry, int radius, u32 color)
 {
     radius = std::min({radius, rx, ry});
     for (int dy = -ry; dy <= ry; ++dy) {
         const int half = roundedHalfSpan(dy, rx, ry, radius);
         rectangle(x - half, y + dy, half * 2 + 1, 1, color);
     }
+}
+
+void drawFuzzyHand(int x, int y, int side, float reach, int stretch)
+{
+    if (reach < 0.05f) {
+        return;
+    }
+    constexpr u32 FurShade = rgb(22, 74, 45);
+    constexpr u32 FurGreen = rgb(112, 174, 61);
+    constexpr u32 FurLight = rgb(183, 218, 88);
+    const int palmX = x + side * std::lround((11 + stretch / 2) * reach);
+    const int palmY = y - std::lround(5 * reach);
+    const int palmSize = std::max(1, static_cast<int>(std::lround(5 * reach)));
+
+    // The wrist stays inside the O as the fingers reach over its rim.
+    for (int i = 0; i < 7; ++i) {
+        const int wristX = x + (palmX - x) * i / 7;
+        const int wristY = y + 4 + (palmY - y - 4) * i / 7;
+        roundedShape(wristX, wristY, 2, palmSize, 2, FurShade);
+    }
+    roundedShape(palmX, palmY, palmSize + 1, palmSize + 1, 4, FurShade);
+    roundedShape(palmX, palmY - 1, palmSize, palmSize, 3, FurGreen);
+    for (int tuft = -1; tuft <= 1; ++tuft) {
+        const int tuftX = palmX + tuft * palmSize / 2;
+        line(tuftX, palmY - palmSize + 2, tuftX - side * 2, palmY - palmSize - 2, FurLight);
+    }
+
+    for (int finger = 0; finger < 3; ++finger) {
+        const int fingerY = palmY - palmSize + 1 + finger * palmSize;
+        const int tipX = palmX + side * (palmSize + (finger == 1 ? 4 : 2));
+        line(palmX, palmY + finger - 1, tipX, fingerY, FurShade);
+        line(palmX, palmY + finger - 2, tipX, fingerY - 1, FurGreen);
+        rectangle(tipX - 1, fingerY - 1, 3, 2, Cream);
+        rectangle(tipX + side, fingerY + 1, 1, 2, Cream);
+    }
+}
+
+void drawStruggle(float waveTime, const StrugglePose& pose)
+{
+    if (pose.leftGrip < 0.05f && pose.rightGrip < 0.05f) {
+        return;
+    }
+    const LogoLetter& letter = logo[MonsterLetter];
+    const int x = letter.x + letter.width / 2;
+    const int y = LowerJawTop + letter.height / 2 + letterBob(waveTime, MonsterLetter) + pose.shake;
+    roundedShape(x, y, 3 + pose.stretch / 5, 9, 3, LipShadow);
+    drawFuzzyHand(x, y, -1, pose.leftGrip, pose.stretch);
+    drawFuzzyHand(x, y, 1, pose.rightGrip, pose.stretch);
 }
 
 void drawFang(int x, int root, int width, int length, int direction, int lean)
@@ -445,15 +524,17 @@ struct Mouth {
     int height;
 };
 
-Mouth monsterMouth(float waveTime, float burst)
+Mouth monsterMouth(float waveTime, float burst, float lunge)
 {
     const LogoLetter& letter = logo[MonsterLetter];
     const int x = letter.x + letter.width / 2;
     const int y = LowerJawTop + letter.height / 2 + letterBob(waveTime, MonsterLetter);
-    // Start in the counter of the O, then fast-out toward the player.
-    const float growth = 1.0f - (1.0f - burst) * (1.0f - burst) * (1.0f - burst);
-    return {x + std::lround(43 * growth), y - std::lround(33 * growth),
-            5 + std::lround(92 * growth), 8 + std::lround(60 * growth)};
+    // Break through the O, then grow again as the tongue rushes into the foreground.
+    const float growth = easeBetween(burst, 0.0f, 0.86f);
+    return {x + std::lround(78 * growth + 18 * lunge),
+            y - std::lround(34 * growth - 5 * lunge),
+            5 + std::lround(110 * growth + 30 * lunge),
+            8 + std::lround(72 * growth + 22 * lunge)};
 }
 
 void drawMonster(const Mouth& mouth)
@@ -462,14 +543,14 @@ void drawMonster(const Mouth& mouth)
     const int y = mouth.y;
     const int rx = mouth.width;
     const int ry = mouth.height;
-    roundedMouthLayer(x + 3, y + 5, rx + 3, ry + 2, 30, LipShadow);
-    roundedMouthLayer(x, y, rx, ry, 28, LipRed);
-    roundedMouthLayer(x - 2, y - ry / 8, rx * 9 / 10, ry * 5 / 6, 24, LipLight);
+    roundedShape(x + 3, y + 5, rx + 3, ry + 2, 30, LipShadow);
+    roundedShape(x, y, rx, ry, 28, LipRed);
+    roundedShape(x - 2, y - ry / 8, rx * 9 / 10, ry * 5 / 6, 24, LipLight);
     const int cavityWidth = std::max(2, rx * 8 / 9);
     const int cavityHeight = std::max(2, ry * 3 / 4);
     const int cavityCorner = std::min({19, cavityWidth, cavityHeight});
-    roundedMouthLayer(x, y + 2, cavityWidth, cavityHeight, cavityCorner, LipShadow);
-    roundedMouthLayer(x + 2, y + 1, cavityWidth * 9 / 10, cavityHeight * 7 / 8, 16, Black);
+    roundedShape(x, y + 2, cavityWidth, cavityHeight, cavityCorner, LipShadow);
+    roundedShape(x + 2, y + 1, cavityWidth * 9 / 10, cavityHeight * 7 / 8, 16, Black);
 
     if (rx < 20) {
         return;
@@ -489,30 +570,32 @@ void drawMonster(const Mouth& mouth)
 
 void drawTongue(const Mouth& mouth, float sweep)
 {
-    // A long, tapered tongue uncoils first, then rolls toward the screen.
-    const float reach = std::clamp(sweep / 0.60f, 0.0f, 1.0f);
-    const int tip = mouth.x + std::lround((Width + 52 - mouth.x) * reach);
+    // The tip gets broader than the root as it gets closer to the viewer.
+    const float reach = easeBetween(sweep, 0.0f, 0.48f);
+    const int tip = mouth.x + std::lround((Width + 28 - mouth.x) * reach);
     for (int x = mouth.x; x < std::min(tip, Width); ++x) {
         const float along = (x - mouth.x) / static_cast<float>(tip - mouth.x);
-        const int y = mouth.y + 27 + std::lround(
-            std::sin(along * 4.5f - sweep * 7.0f) * 44.0f * along) -
-            std::lround(along * 50 * reach);
-        const int half = std::max(1, static_cast<int>(std::lround((1.0f - along) * (13 + reach * 19))));
+        const int y = mouth.y + 29 + std::lround(
+            std::sin(along * 3.8f - sweep * 6.0f) * 36.0f * along);
+        const float cap = std::sqrt(std::min(1.0f, (1.0f - along) * 9.0f));
+        const float thickness = 13 + along * (4 + 62 * reach);
+        const int half = std::max(1, static_cast<int>(std::lround(thickness * cap)));
         rectangle(x, y - half, 1, half * 2, TongueDark);
         rectangle(x, y - half + 3, 1, std::max(1, half * 2 - 9), TonguePink);
         rectangle(x, y - half / 2, 1, std::max(1, half / 5), TongueLight);
     }
 
-    // Its curved edge crosses every row, leaving black behind it.
-    const float wipe = std::clamp((sweep - 0.35f) / 0.65f, 0.0f, 1.0f);
+    // The near edge rolls back across the view from the side the tip reached.
+    const float wipe = std::clamp((sweep - 0.39f) / 0.61f, 0.0f, 1.0f);
     if (wipe > 0.0f) {
         for (int y = 0; y < Height; ++y) {
-            const float bend = std::sin(y * 0.013f + sweep * 3.0f) * 42.0f;
-            const int edge = std::lround(-132 + (Width + 220) * wipe + bend);
-            rectangle(0, y, edge - 60, 1, Black);
-            rectangle(edge - 60, y, 60, 1, TongueDark);
-            rectangle(edge - 48, y, 45, 1, TonguePink);
-            rectangle(edge - 20, y, 8, 1, TongueLight);
+            const float distance = (y - 134) / 134.0f;
+            const float bend = distance * distance * 83 + std::sin(y * 0.018f + sweep * 4.0f) * 16;
+            const int edge = std::lround(Width + 20 - (Width + 186) * wipe + bend);
+            rectangle(edge, y, Width - edge, 1, Black);
+            rectangle(edge, y, 65, 1, TongueDark);
+            rectangle(edge + 4, y, 49, 1, TonguePink);
+            rectangle(edge + 13, y, 9, 1, TongueLight);
         }
     }
 }
@@ -528,14 +611,23 @@ void drawTitle(const TitleState& title)
 
     std::memcpy(pixels, seaside, sizeof pixels);
     drawMenu(title.selected);
-    drawLogo(title.waveTime);
+    StrugglePose pose{};
+    if (title.screen == Screen::Struggle) {
+        pose = strugglePose(title.sceneTime, 1.0f);
+    } else if (title.screen == Screen::Burst) {
+        const float release = 1.0f - easeBetween(title.sceneTime, 0.0f, MouthBurstSeconds * 0.28f);
+        pose = strugglePose(StruggleSeconds, release);
+    }
+    drawLogo(title.waveTime, pose);
+    drawStruggle(title.waveTime, pose);
     if (title.screen == Screen::Burst || title.screen == Screen::Sweep) {
         const bool sweeping = title.screen == Screen::Sweep;
         const float burst = sweeping ? 1.0f : title.sceneTime / MouthBurstSeconds;
-        const Mouth mouth = monsterMouth(title.waveTime, burst);
+        const float sweep = sweeping ? title.sceneTime / TongueSweepSeconds : 0.0f;
+        const Mouth mouth = monsterMouth(title.waveTime, burst, easeBetween(sweep, 0.0f, 0.40f));
         drawMonster(mouth);
         if (sweeping) {
-            drawTongue(mouth, title.sceneTime / TongueSweepSeconds);
+            drawTongue(mouth, sweep);
         }
     }
 }
