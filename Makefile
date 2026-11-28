@@ -9,16 +9,23 @@ endif
 
 include $(DEVKITPPC)/wii_rules
 
-MAIN := $(firstword $(wildcard source/main.cpp) main.cpp)
+SOURCE_DIR := $(if $(wildcard source/main.cpp),source,.)
+SOURCES := $(wildcard $(SOURCE_DIR)/*.cpp)
+HEADERS := $(wildcard $(SOURCE_DIR)/*.h)
 
-.PHONY: all clean
+.PHONY: all newspaper clean
 all: wii-game.dol
 
-wii-game.dol: wii-game.elf
+newspaper: wii-newspaper.dol
 
-wii-game.elf: $(MAIN)
-	$(CXX) $(MACHDEP) -O2 -Wall -Wextra -I"$(LIBOGC_INC)" $< \
+wii-game.dol: wii-game.elf
+wii-newspaper.dol: wii-newspaper.elf
+
+wii-newspaper.elf: PREVIEW_FLAG := -DPREVIEW_NEWSPAPER
+
+wii-game.elf wii-newspaper.elf: $(SOURCES) $(HEADERS) $(firstword $(MAKEFILE_LIST))
+	$(CXX) $(MACHDEP) $(PREVIEW_FLAG) -O2 -Wall -Wextra -I"$(LIBOGC_INC)" $(SOURCES) \
 		-L"$(LIBOGC_LIB)" -lwiiuse -lbte -logc -lm -o $@
 
 clean:
-	rm -f wii-game.elf wii-game.dol
+	rm -f wii-game.elf wii-game.dol wii-newspaper.elf wii-newspaper.dol
